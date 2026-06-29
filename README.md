@@ -41,7 +41,7 @@ codex --version
 
 打开最新版 Release：
 
-[下载 Obsidian Codex v0.2.0](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.2.0)
+[下载 Obsidian Codex v0.2.1](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.2.1)
 
 下载这三个文件：
 

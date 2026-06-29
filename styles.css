@@ -104,6 +104,8 @@
   min-height: 0;
   overflow: auto;
   padding: 12px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .codex-welcome {
@@ -125,6 +127,8 @@
 
 .codex-message {
   margin: 0 0 14px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .codex-message-role {
@@ -142,6 +146,9 @@
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
   background: var(--background-secondary);
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .codex-message-user .codex-message-body {

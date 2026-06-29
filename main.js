@@ -14,6 +14,17 @@ const path = require("path");
 const VIEW_TYPE_CODEX = "codex-view";
 const PLUGIN_DIR = ".obsidian/plugins/codex";
 const CODEX_WINDOW_COUNT = 5;
+const OLD_DEFAULT_PROMPT_PREFIX = "You are Codex running inside an Obsidian vault. Use the vault root as the workspace. When you mention vault files, prefer Obsidian wikilinks or vault-relative paths. Be concise, practical, and careful with file edits.";
+const DEFAULT_PROMPT_PREFIX = [
+  "你是运行在 Obsidian vault 里的 Codex 助手。当前 vault 根目录就是你的工作目录。",
+  "回答时默认分成两部分：",
+  "## 思考过程（简要）",
+  "- 只写可以公开展示的简要判断依据、检查步骤和取舍，不展开隐藏推理链。",
+  "## 结果",
+  "- 给出结论、建议、可执行步骤或改动摘要。",
+  "不要输出命令行日志、运行参数、工具调用记录或大段代码，除非用户明确要求看代码。",
+  "提到 vault 文件时，优先使用 Obsidian wikilink 或 vault-relative path。"
+].join("\n");
 
 const DEFAULT_SETTINGS = {
   codexCliPath: "",
@@ -25,8 +36,7 @@ const DEFAULT_SETTINGS = {
   maxContextChars: 30000,
   extraArgs: "",
   dangerouslyBypassApprovalsAndSandbox: false,
-  promptPrefix:
-    "You are Codex running inside an Obsidian vault. Use the vault root as the workspace. When you mention vault files, prefer Obsidian wikilinks or vault-relative paths. Be concise, practical, and careful with file edits."
+  promptPrefix: DEFAULT_PROMPT_PREFIX
 };
 
 function createDefaultWindow(index) {
@@ -400,10 +410,9 @@ class CodexView extends ItemView {
     this.activeMessageIndex = Number(assistantEl.dataset.messageIndex);
     this.activeAssistantEl = assistantEl;
     this.setRunning(true);
-    let hasProcessOutput = false;
     const startedAt = Date.now();
     const statusTimer = window.setInterval(() => {
-      if (!this.activeAssistantEl || hasProcessOutput) return;
+      if (!this.activeAssistantEl) return;
       const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       this.updateAssistantText(`Codex 正在运行... ${seconds}s`);
       this.scrollToBottom();
@@ -412,25 +421,16 @@ class CodexView extends ItemView {
     try {
       const prompt = await this.plugin.buildPrompt(text, options);
       await this.plugin.runCodex(prompt, {
-        onStart: (info) => {
+        onStart: () => {
           this.updateAssistantText([
             "Codex 已启动。",
-            `cwd: ${info.cwd}`,
-            `command: ${info.command} ${info.args.join(" ")}`
+            "我会隐藏命令行日志，结束后只显示「思考过程（简要）」和「结果」。"
           ].join("\n"));
-        },
-        onStdout: (chunk) => {
-          hasProcessOutput = true;
-          this.appendAssistantChunk(chunk);
-        },
-        onStderr: (chunk) => {
-          hasProcessOutput = true;
-          this.appendAssistantChunk(chunk);
         },
         onClose: (result) => {
           if (result.finalMessage) {
             this.updateAssistantText(result.finalMessage);
-          } else if (result.output) {
+          } else if (result.code !== 0 && result.output) {
             this.updateAssistantText(result.output);
           } else {
             this.updateAssistantText("Codex 已结束，但没有返回文本。");
@@ -650,6 +650,9 @@ class CodexPlugin extends Plugin {
   async loadSettings() {
     const data = (await this.loadData()) || {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (!data.promptPrefix || data.promptPrefix === OLD_DEFAULT_PROMPT_PREFIX) {
+      this.settings.promptPrefix = DEFAULT_PROMPT_PREFIX;
+    }
     this.settings.windows = normalizeWindows(data);
     if (!this.settings.windows.some((windowState) => windowState.id === this.settings.activeWindowId)) {
       this.settings.activeWindowId = "window-1";
