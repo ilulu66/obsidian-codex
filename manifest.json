@@ -1,0 +1,9 @@
+{
+  "id": "codex",
+  "name": "Codex",
+  "version": "0.2.0",
+  "minAppVersion": "1.4.5",
+  "description": "Call Codex from inside Obsidian, using the current vault as Codex's working directory.",
+  "author": "Lulu + Codex",
+  "isDesktopOnly": true
+}
