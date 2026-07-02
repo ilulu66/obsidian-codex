@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Keep a real Codex session id per window and resume it on follow-up messages.
+- Add context modes: no context, selected text, current section, active note, backlinks, and same-tag notes.
+- Add a rename action for each Codex window.
+- Add clearer running status for context preparation, session creation/resume, and completion.
+- Reset a window's Codex session when clearing that window.
+
 ## 0.2.2
 
 - Send messages with `Enter`.

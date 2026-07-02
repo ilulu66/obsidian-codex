@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS = {
   sandbox: "workspace-write",
   approvalPolicy: "never",
   enableSearch: false,
+  contextMode: "active-note",
   includeActiveNoteContext: true,
   maxContextChars: 30000,
   extraArgs: "",
@@ -44,7 +45,8 @@ function createDefaultWindow(index) {
     id: `window-${index}`,
     title: String(index),
     messages: [],
-    lastResponse: ""
+    lastResponse: "",
+    sessionId: ""
   };
 }
 
@@ -58,9 +60,10 @@ function normalizeWindows(data) {
       ...createDefaultWindow(index),
       ...existing,
       id,
-      title: String(index),
+      title: typeof existing.title === "string" && existing.title.trim() ? existing.title.trim() : String(index),
       messages: Array.isArray(existing.messages) ? existing.messages : [],
-      lastResponse: typeof existing.lastResponse === "string" ? existing.lastResponse : ""
+      lastResponse: typeof existing.lastResponse === "string" ? existing.lastResponse : "",
+      sessionId: typeof existing.sessionId === "string" ? existing.sessionId : ""
     });
   }
 
@@ -186,15 +189,83 @@ function clipText(text, maxChars) {
   return `${text.slice(0, maxChars)}\n\n[...truncated ${text.length - maxChars} characters...]`;
 }
 
-function buildCodexArgs(settings, outputFile) {
+function extractCurrentSection(content, cursorLine) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length === 0) return "";
+  let start = Math.max(0, Math.min(cursorLine || 0, lines.length - 1));
+  let headingLevel = 0;
+
+  for (let index = start; index >= 0; index -= 1) {
+    const match = lines[index].match(/^(#{1,6})\s+/);
+    if (match) {
+      start = index;
+      headingLevel = match[1].length;
+      break;
+    }
+  }
+
+  if (!headingLevel) {
+    let paragraphStart = Math.max(0, Math.min(cursorLine || 0, lines.length - 1));
+    let paragraphEnd = paragraphStart;
+    while (paragraphStart > 0 && lines[paragraphStart - 1].trim()) paragraphStart -= 1;
+    while (paragraphEnd < lines.length - 1 && lines[paragraphEnd + 1].trim()) paragraphEnd += 1;
+    return lines.slice(paragraphStart, paragraphEnd + 1).join("\n").trim();
+  }
+
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+/);
+    if (match && match[1].length <= headingLevel) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n").trim();
+}
+
+function getTagsFromCache(cache) {
+  const tags = new Set();
+  for (const tag of cache?.tags || []) {
+    if (tag?.tag) tags.add(tag.tag.replace(/^#/, ""));
+  }
+  const frontmatterTags = cache?.frontmatter?.tags;
+  const values = Array.isArray(frontmatterTags) ? frontmatterTags : typeof frontmatterTags === "string" ? frontmatterTags.split(/[,\s]+/) : [];
+  for (const tag of values) {
+    const clean = String(tag || "").trim().replace(/^#/, "");
+    if (clean) tags.add(clean);
+  }
+  return tags;
+}
+
+function extractSessionId(output) {
+  const match = output.match(/session id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  return match ? match[1] : "";
+}
+
+function sanitizeWindowTitle(rawTitle, fallback) {
+  const title = (rawTitle || "").trim().replace(/\s+/g, " ");
+  return title ? title.slice(0, 18) : fallback;
+}
+
+function addOption(selectEl, value, label) {
+  const option = selectEl.createEl("option", { text: label });
+  option.value = value;
+  return option;
+}
+
+function buildCodexArgs(settings, outputFile, sessionId) {
   const args = [];
   if (settings.enableSearch) {
     args.push("--search");
   }
   if (!settings.dangerouslyBypassApprovalsAndSandbox) {
     args.push("-a", settings.approvalPolicy || "never");
+    args.push("-s", settings.sandbox || "workspace-write");
   }
   args.push("exec");
+  if (sessionId) {
+    args.push("resume");
+  }
 
   if (settings.model && settings.model.trim()) {
     args.push("-m", settings.model.trim());
@@ -202,12 +273,12 @@ function buildCodexArgs(settings, outputFile) {
 
   if (settings.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
-  } else {
-    args.push("-s", settings.sandbox || "workspace-write");
   }
 
   args.push("--skip-git-repo-check");
-  args.push("--color", "never");
+  if (!sessionId) {
+    args.push("--color", "never");
+  }
 
   const extraArgs = splitCommandLine(settings.extraArgs || "");
   if (extraArgs.length > 0) {
@@ -215,6 +286,9 @@ function buildCodexArgs(settings, outputFile) {
   }
 
   args.push("-o", outputFile);
+  if (sessionId) {
+    args.push(sessionId);
+  }
   args.push("-");
   return args;
 }
@@ -225,8 +299,10 @@ class CodexView extends ItemView {
     this.plugin = plugin;
     this.outputEl = null;
     this.inputEl = null;
+    this.contextSelectEl = null;
     this.sendButtonEl = null;
     this.stopButtonEl = null;
+    this.statusEl = null;
     this.activeAssistantEl = null;
     this.tabBarEl = null;
     this.windowButtons = [];
@@ -258,6 +334,15 @@ class CodexView extends ItemView {
     this.renderTabs();
 
     const actions = header.createDiv({ cls: "codex-header-actions" });
+    const renameButton = actions.createEl("button", {
+      cls: "codex-icon-button",
+      text: "命名",
+      attr: { type: "button", "aria-label": "Rename current Codex window" }
+    });
+    renameButton.addEventListener("click", async () => {
+      await this.renameActiveWindow();
+    });
+
     const clearButton = actions.createEl("button", {
       cls: "codex-icon-button",
       text: "Clear",
@@ -284,7 +369,7 @@ class CodexView extends ItemView {
     });
     noteButton.addEventListener("click", async () => {
       await this.sendPrompt("请阅读当前笔记，指出最值得优化的地方，并给出可以直接执行的建议。", {
-        includeActiveNoteContext: true
+        contextMode: "active-note"
       });
     });
 
@@ -316,13 +401,20 @@ class CodexView extends ItemView {
     });
 
     const contextLabel = toolbar.createEl("label", { cls: "codex-context-toggle" });
-    const contextInput = contextLabel.createEl("input", { type: "checkbox" });
-    contextInput.checked = this.plugin.settings.includeActiveNoteContext;
-    contextInput.addEventListener("change", async () => {
-      this.plugin.settings.includeActiveNoteContext = contextInput.checked;
+    contextLabel.createSpan({ text: "上下文" });
+    this.contextSelectEl = contextLabel.createEl("select", { cls: "codex-context-select" });
+    addOption(this.contextSelectEl, "none", "不带");
+    addOption(this.contextSelectEl, "selection", "选中");
+    addOption(this.contextSelectEl, "section", "小节");
+    addOption(this.contextSelectEl, "active-note", "整篇");
+    addOption(this.contextSelectEl, "backlinks", "反链");
+    addOption(this.contextSelectEl, "same-tag", "同标签");
+    this.contextSelectEl.value = this.plugin.settings.contextMode || "active-note";
+    this.contextSelectEl.addEventListener("change", async () => {
+      this.plugin.settings.contextMode = this.contextSelectEl.value;
+      this.plugin.settings.includeActiveNoteContext = this.contextSelectEl.value !== "none";
       await this.plugin.saveSettings();
     });
-    contextLabel.createSpan({ text: "带当前笔记" });
 
     this.inputEl = composer.createEl("textarea", {
       attr: {
@@ -340,6 +432,7 @@ class CodexView extends ItemView {
     const footer = composer.createDiv({ cls: "codex-composer-footer" });
     const cwd = getVaultPath(this.app);
     footer.createSpan({ cls: "codex-cwd", text: cwd ? `cwd: ${cwd}` : "cwd: vault" });
+    this.statusEl = footer.createSpan({ cls: "codex-status", text: "Ready" });
     this.sendButtonEl = footer.createEl("button", {
       cls: "mod-cta",
       text: "发送",
@@ -371,8 +464,30 @@ class CodexView extends ItemView {
       button.addEventListener("click", async () => {
         await this.switchWindow(windowState.id);
       });
+      button.addEventListener("dblclick", async (event) => {
+        event.preventDefault();
+        await this.renameWindow(windowState.id);
+      });
       this.windowButtons.push(button);
     }
+  }
+
+  async renameActiveWindow() {
+    await this.renameWindow(this.plugin.getActiveWindow().id);
+  }
+
+  async renameWindow(windowId) {
+    if (this.plugin.currentProcess) {
+      new Notice("Codex 还在运行，结束后再命名窗口");
+      return;
+    }
+    const windowState = this.plugin.settings.windows.find((candidate) => candidate.id === windowId);
+    if (!windowState) return;
+    const nextTitle = window.prompt("给这个 Codex 窗口起个名字", windowState.title);
+    if (nextTitle === null) return;
+    await this.plugin.renameWindow(windowId, nextTitle);
+    this.renderTabs();
+    this.renderActiveWindow();
   }
 
   async switchWindow(windowId) {
@@ -395,7 +510,7 @@ class CodexView extends ItemView {
     }
     this.inputEl.value = "";
     await this.sendPrompt(text, {
-      includeActiveNoteContext: this.plugin.settings.includeActiveNoteContext
+      contextMode: this.plugin.settings.contextMode
     });
   }
 
@@ -406,28 +521,37 @@ class CodexView extends ItemView {
     }
 
     this.appendMessage("user", text);
-    const assistantEl = this.appendMessage("assistant", "Codex 已启动，通常需要 10-60 秒...");
+    const assistantEl = this.appendMessage("assistant", "正在准备上下文...");
     this.activeMessageIndex = Number(assistantEl.dataset.messageIndex);
     this.activeAssistantEl = assistantEl;
     this.setRunning(true);
+    this.setStatus("Preparing context");
+    let statusText = "正在准备上下文";
     const startedAt = Date.now();
     const statusTimer = window.setInterval(() => {
       if (!this.activeAssistantEl) return;
       const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-      this.updateAssistantText(`Codex 正在运行... ${seconds}s`);
+      this.updateAssistantText(`${statusText}... ${seconds}s`);
       this.scrollToBottom();
     }, 1000);
 
     try {
+      this.updateAssistantText("正在准备上下文...");
       const prompt = await this.plugin.buildPrompt(text, options);
+      statusText = "正在启动 Codex";
+      this.setStatus("Starting Codex");
       await this.plugin.runCodex(prompt, {
-        onStart: () => {
+        onStart: (info) => {
+          statusText = info.isResume ? "正在续接这个窗口的 Codex 会话" : "正在创建这个窗口的 Codex 会话";
+          this.setStatus(info.isResume ? "Resuming session" : "New session");
           this.updateAssistantText([
-            "Codex 已启动。",
+            statusText + "。",
             "我会隐藏命令行日志，结束后只显示「思考过程（简要）」和「结果」。"
           ].join("\n"));
         },
         onClose: (result) => {
+          statusText = "正在整理结果";
+          this.setStatus(result.code === 0 ? "Done" : "Error");
           if (result.finalMessage) {
             this.updateAssistantText(result.finalMessage);
           } else if (result.code !== 0 && result.output) {
@@ -440,6 +564,7 @@ class CodexView extends ItemView {
     } catch (error) {
       assistantEl.addClass("codex-message-error");
       this.updateAssistantText(`Codex failed: ${error.message || error}`);
+      this.setStatus("Error");
       new Notice("Codex 运行失败，打开面板查看详情");
     } finally {
       window.clearInterval(statusTimer);
@@ -525,6 +650,15 @@ class CodexView extends ItemView {
     if (this.sendButtonEl) this.sendButtonEl.disabled = isRunning;
     if (this.stopButtonEl) this.stopButtonEl.disabled = !isRunning;
     if (this.inputEl) this.inputEl.classList.toggle("codex-running", isRunning);
+    if (!isRunning && this.statusEl && this.statusEl.textContent === "Running") {
+      this.setStatus("Ready");
+    }
+  }
+
+  setStatus(status) {
+    if (!this.statusEl) return;
+    this.statusEl.textContent = status;
+    this.statusEl.dataset.status = status.toLowerCase().replace(/\s+/g, "-");
   }
 
   scrollToBottom() {
@@ -653,6 +787,9 @@ class CodexPlugin extends Plugin {
     if (!data.promptPrefix || data.promptPrefix === OLD_DEFAULT_PROMPT_PREFIX) {
       this.settings.promptPrefix = DEFAULT_PROMPT_PREFIX;
     }
+    if (!data.contextMode) {
+      this.settings.contextMode = data.includeActiveNoteContext === false ? "none" : "active-note";
+    }
     this.settings.windows = normalizeWindows(data);
     if (!this.settings.windows.some((windowState) => windowState.id === this.settings.activeWindowId)) {
       this.settings.activeWindowId = "window-1";
@@ -698,6 +835,14 @@ class CodexPlugin extends Plugin {
     return true;
   }
 
+  async renameWindow(windowId, rawTitle) {
+    const windowState = this.settings.windows.find((candidate) => candidate.id === windowId);
+    if (!windowState) return;
+    const fallback = windowId.replace("window-", "");
+    windowState.title = sanitizeWindowTitle(rawTitle, fallback);
+    await this.saveSettings();
+  }
+
   addMessageToActiveWindow(role, text) {
     const windowState = this.getActiveWindow();
     windowState.messages.push({
@@ -720,6 +865,7 @@ class CodexPlugin extends Plugin {
     const windowState = this.getActiveWindow();
     windowState.messages = [];
     windowState.lastResponse = "";
+    windowState.sessionId = "";
     if (this.settings.activeWindowId === "window-1") {
       this.lastResponse = "";
     }
@@ -736,6 +882,13 @@ class CodexPlugin extends Plugin {
     const windowState = this.settings.windows.find((candidate) => candidate.id === windowId) || this.getActiveWindow();
     windowState.lastResponse = text;
     this.lastResponse = text;
+    await this.saveSettings();
+  }
+
+  async setSessionIdForWindow(windowId, sessionId) {
+    if (!sessionId) return;
+    const windowState = this.settings.windows.find((candidate) => candidate.id === windowId) || this.getActiveWindow();
+    windowState.sessionId = sessionId;
     await this.saveSettings();
   }
 
@@ -762,32 +915,123 @@ class CodexPlugin extends Plugin {
     }
   }
 
-  async getActiveNoteContext(explicitContext) {
-    if (explicitContext) {
-      return explicitContext;
-    }
-
+  async getActiveMarkdownInfo() {
     const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (activeMarkdownView && activeMarkdownView.file) {
       return {
+        file: activeMarkdownView.file,
         path: activeMarkdownView.file.path,
-        content: activeMarkdownView.editor.getValue()
+        content: activeMarkdownView.editor.getValue(),
+        selection: activeMarkdownView.editor.getSelection(),
+        cursorLine: activeMarkdownView.editor.getCursor().line
       };
     }
 
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && activeFile.extension === "md") {
       return {
+        file: activeFile,
         path: activeFile.path,
-        content: await this.app.vault.read(activeFile)
+        content: await this.app.vault.read(activeFile),
+        selection: "",
+        cursorLine: 0
       };
     }
 
     return null;
   }
 
+  async getActiveNoteContext(explicitContext) {
+    if (explicitContext) {
+      return explicitContext;
+    }
+
+    return this.getActiveMarkdownInfo();
+  }
+
+  async readMarkdownContextFiles(files, labelPrefix, maxFiles) {
+    const blocks = [];
+    for (const file of files.slice(0, maxFiles)) {
+      try {
+        blocks.push({
+          label: labelPrefix,
+          path: file.path,
+          content: await this.app.vault.read(file)
+        });
+      } catch (error) {
+      }
+    }
+    return blocks;
+  }
+
+  async getContextBlocks(contextMode, explicitContext) {
+    if (explicitContext) {
+      return [{
+        label: "Explicit context",
+        path: explicitContext.path,
+        content: explicitContext.content
+      }];
+    }
+
+    const mode = contextMode || this.settings.contextMode || "active-note";
+    if (mode === "none") return [];
+
+    const active = await this.getActiveMarkdownInfo();
+    if (!active) return [];
+
+    if (mode === "selection") {
+      return [{
+        label: active.selection.trim() ? "Selected text" : "Selected text (empty)",
+        path: active.path,
+        content: active.selection.trim() || "No text is currently selected."
+      }];
+    }
+
+    if (mode === "section") {
+      return [{
+        label: "Current section",
+        path: active.path,
+        content: extractCurrentSection(active.content, active.cursorLine) || active.content
+      }];
+    }
+
+    if (mode === "backlinks") {
+      const backlinkData = this.app.metadataCache.getBacklinksForFile(active.file)?.data || {};
+      const backlinkFiles = Object.keys(backlinkData)
+        .map((filePath) => this.app.vault.getAbstractFileByPath(filePath))
+        .filter((file) => file && file.extension === "md" && file.path !== active.path);
+      return [
+        { label: "Active note", path: active.path, content: active.content },
+        ...(await this.readMarkdownContextFiles(backlinkFiles, "Backlink note", 5))
+      ];
+    }
+
+    if (mode === "same-tag") {
+      const activeTags = getTagsFromCache(this.app.metadataCache.getFileCache(active.file));
+      if (activeTags.size === 0) {
+        return [{ label: "Active note (no tags found)", path: active.path, content: active.content }];
+      }
+      const sameTagFiles = this.app.vault.getMarkdownFiles()
+        .filter((file) => file.path !== active.path)
+        .filter((file) => {
+          const tags = getTagsFromCache(this.app.metadataCache.getFileCache(file));
+          return Array.from(activeTags).some((tag) => tags.has(tag));
+        });
+      return [
+        { label: `Active note (tags: ${Array.from(activeTags).join(", ")})`, path: active.path, content: active.content },
+        ...(await this.readMarkdownContextFiles(sameTagFiles, "Same-tag note", 5))
+      ];
+    }
+
+    return [{
+      label: "Active note",
+      path: active.path,
+      content: active.content
+    }];
+  }
+
   async buildPrompt(userPrompt, options = {}) {
-    const includeActiveNoteContext = options.includeActiveNoteContext ?? this.settings.includeActiveNoteContext;
+    const contextMode = options.contextMode || (options.includeActiveNoteContext === false ? "none" : this.settings.contextMode || "active-note");
     const maxContextChars = Number(this.settings.maxContextChars) || DEFAULT_SETTINGS.maxContextChars;
     const vaultPath = getVaultPath(this.app);
     const sections = [];
@@ -800,19 +1044,22 @@ class CodexPlugin extends Plugin {
       sections.push(`Vault absolute path: ${vaultPath}`);
     }
 
-    if (includeActiveNoteContext || options.explicitContext) {
-      const context = await this.getActiveNoteContext(options.explicitContext);
-      if (context) {
-        sections.push(
-          [
-            "Active Obsidian note context:",
+    const contextBlocks = await this.getContextBlocks(contextMode, options.explicitContext);
+    if (contextBlocks.length > 0) {
+      const perBlockLimit = Math.max(1000, Math.floor(maxContextChars / contextBlocks.length));
+      sections.push(
+        [
+          `Obsidian context mode: ${contextMode}`,
+          ...contextBlocks.map((context) => [
+            "",
+            `Context: ${context.label}`,
             `Path: ${context.path}`,
             "~~~markdown",
-            clipText(context.content, maxContextChars),
+            clipText(context.content, perBlockLimit),
             "~~~"
-          ].join("\n")
-        );
-      }
+          ].join("\n"))
+        ].join("\n")
+      );
     }
 
     sections.push(["User request:", userPrompt].join("\n"));
@@ -829,6 +1076,7 @@ class CodexPlugin extends Plugin {
     fs.mkdirSync(pluginDir, { recursive: true });
     const activeWindow = this.getActiveWindow();
     const activeWindowId = activeWindow.id;
+    const sessionId = activeWindow.sessionId || "";
     const outputFile = path.join(pluginDir, `${activeWindowId}-last-response.md`);
     try {
       fs.unlinkSync(outputFile);
@@ -837,7 +1085,7 @@ class CodexPlugin extends Plugin {
     }
 
     const commandInfo = resolveCodexCommand(this.settings);
-    const codexArgs = buildCodexArgs(this.settings, outputFile);
+    const codexArgs = buildCodexArgs(this.settings, outputFile, sessionId);
     const args = [...commandInfo.args, ...codexArgs];
     const env = Object.assign({}, process.env, {
       PATH: getEnhancedPath(process.env.PATH || ""),
@@ -854,7 +1102,7 @@ class CodexPlugin extends Plugin {
     this.currentProcess = child;
     let combinedOutput = "";
 
-    callbacks.onStart?.({ command: commandInfo.command, args, cwd: vaultPath });
+    callbacks.onStart?.({ command: commandInfo.command, args, cwd: vaultPath, isResume: Boolean(sessionId), sessionId });
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
@@ -882,11 +1130,16 @@ class CodexPlugin extends Plugin {
       child.on("close", async (code, signal) => {
         this.currentProcess = null;
         const cleanOutput = stripAnsi(combinedOutput).trim();
+        const nextSessionId = extractSessionId(cleanOutput);
         let finalMessage = "";
         try {
           finalMessage = fs.readFileSync(outputFile, "utf8").trim();
         } catch (error) {
           finalMessage = cleanOutput;
+        }
+
+        if (nextSessionId) {
+          await this.setSessionIdForWindow(activeWindowId, nextSessionId);
         }
 
         if (finalMessage) {
@@ -1023,13 +1276,22 @@ class CodexSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Context").setHeading();
 
     new Setting(containerEl)
-      .setName("Include active note by default")
-      .setDesc("从 Codex 面板发送时，自动把当前 Markdown 笔记带入上下文。")
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.includeActiveNoteContext).onChange(async (value) => {
-          this.plugin.settings.includeActiveNoteContext = value;
-          await this.plugin.saveSettings();
-        });
+      .setName("Default context mode")
+      .setDesc("从 Codex 面板发送时，默认带入哪部分 Obsidian 上下文。")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("none", "不带上下文")
+          .addOption("selection", "选中文本")
+          .addOption("section", "当前小节")
+          .addOption("active-note", "整篇当前笔记")
+          .addOption("backlinks", "当前笔记 + 反链")
+          .addOption("same-tag", "当前笔记 + 同标签笔记")
+          .setValue(this.plugin.settings.contextMode || "active-note")
+          .onChange(async (value) => {
+            this.plugin.settings.contextMode = value;
+            this.plugin.settings.includeActiveNoteContext = value !== "none";
+            await this.plugin.saveSettings();
+          });
       });
 
     new Setting(containerEl)
