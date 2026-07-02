@@ -171,6 +171,14 @@ npm run package
 
 `npm run package` 会在 `dist/` 里生成可发布的 zip。
 
+## 项目复盘素材
+
+如果你想写这个插件的项目复盘文章，可以看：
+
+- `docs/project-retrospective-source-pack.md`：完整素材包
+- `docs/conversation-timeline.md`：对话时间线
+- `docs/claude-writing-brief.md`：给 Claude 的写作 brief
+
 ## License
 
 MIT
