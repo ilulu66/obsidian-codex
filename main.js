@@ -2,14 +2,39 @@ const {
   ItemView,
   MarkdownView,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting
 } = require("obsidian");
-const { spawn } = require("child_process");
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
+
+let spawn = null;
+let fs = null;
+let os = null;
+let nodePath = null;
+try {
+  ({ spawn } = require("child_process"));
+  fs = require("fs");
+  os = require("os");
+  nodePath = require("path");
+} catch (error) {
+  // Obsidian mobile has no Node runtime; the plugin runs in sync-view mode there.
+}
+
+const FALLBACK_PATH = {
+  sep: "/",
+  delimiter: ":",
+  join: (...parts) => parts.filter(Boolean).join("/").replace(/\/{2,}/g, "/"),
+  basename: (input) => String(input || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "",
+  extname: (input) => {
+    const base = String(input || "").split(/[\\/]/).pop() || "";
+    const dotIndex = base.lastIndexOf(".");
+    return dotIndex > 0 ? base.slice(dotIndex) : "";
+  }
+};
+const path = nodePath || FALLBACK_PATH;
+const CAN_RUN_CODEX = Boolean(spawn && fs && os && nodePath && Platform && Platform.isDesktopApp);
+const MOBILE_READONLY_NOTICE = "手机端是同步查看模式：可以查看、复制、插入聊天记录。运行 Codex 请在电脑上进行，结果会随 vault 同步回手机。";
 
 const VIEW_TYPE_CODEX = "codex-view";
 const PLUGIN_DIR = ".obsidian/plugins/codex";
@@ -94,7 +119,7 @@ function getVaultPath(app) {
 }
 
 function expandHome(input) {
-  if (!input) return input;
+  if (!input || !os) return input;
   if (input === "~") return os.homedir();
   if (input.startsWith("~/")) return path.join(os.homedir(), input.slice(2));
   return input;
@@ -102,7 +127,7 @@ function expandHome(input) {
 
 function fileExists(filePath) {
   try {
-    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+    return Boolean(fs) && fs.existsSync(filePath) && fs.statSync(filePath).isFile();
   } catch (error) {
     return false;
   }
@@ -168,6 +193,7 @@ function getNvmBins(homeDir) {
 }
 
 function getEnhancedPath(existingPath) {
+  if (!os) return existingPath || "";
   const homeDir = os.homedir();
   const candidates = [
     path.join(homeDir, ".npm-global", "bin"),
@@ -190,6 +216,7 @@ function getEnhancedPath(existingPath) {
 }
 
 function detectCodexPath() {
+  if (!os || !fs) return "codex";
   const homeDir = os.homedir();
   const candidates = [
     path.join(homeDir, ".npm-global", "bin", process.platform === "win32" ? "codex.cmd" : "codex"),
@@ -577,6 +604,15 @@ class CodexView extends ItemView {
     });
 
     this.setRunning(false);
+
+    if (!CAN_RUN_CODEX) {
+      this.inputEl.disabled = true;
+      this.inputEl.setAttribute("placeholder", MOBILE_READONLY_NOTICE);
+      imageButton.disabled = true;
+      noteButton.disabled = true;
+      this.setStatus("Mobile");
+      this.setRunStatus("手机同步模式", MOBILE_READONLY_NOTICE, "idle", 0);
+    }
   }
 
   renderTabs() {
@@ -703,6 +739,10 @@ class CodexView extends ItemView {
   }
 
   async sendPrompt(text, options = {}) {
+    if (!CAN_RUN_CODEX) {
+      new Notice(MOBILE_READONLY_NOTICE);
+      return;
+    }
     if (this.plugin.currentProcess) {
       new Notice("Codex 还在运行，先等它结束或点击 Stop");
       return;
@@ -841,6 +881,9 @@ class CodexView extends ItemView {
     welcome.createEl("p", {
       text: "当前 vault 会作为 Codex 的工作目录。这个窗口的对话会单独保存。"
     });
+    if (!CAN_RUN_CODEX) {
+      welcome.createEl("p", { text: MOBILE_READONLY_NOTICE });
+    }
   }
 
   async clearOutput() {
@@ -850,7 +893,7 @@ class CodexView extends ItemView {
   }
 
   setRunning(isRunning) {
-    if (this.sendButtonEl) this.sendButtonEl.disabled = isRunning;
+    if (this.sendButtonEl) this.sendButtonEl.disabled = isRunning || !CAN_RUN_CODEX;
     if (this.stopButtonEl) this.stopButtonEl.disabled = !isRunning;
     if (this.statusPanelStopButtonEl) this.statusPanelStopButtonEl.disabled = !isRunning;
     if (this.inputEl) this.inputEl.classList.toggle("codex-running", isRunning);
@@ -1132,7 +1175,7 @@ class CodexPlugin extends Plugin {
     const windowState = this.getActiveWindow();
     if (windowState.lastResponse) return windowState.lastResponse;
     const vaultPath = getVaultPath(this.app);
-    if (!vaultPath) return "";
+    if (!vaultPath || !fs) return "";
     const outputFile = this.getWindowOutputFile(windowState.id) || path.join(vaultPath, PLUGIN_DIR, "last-response.md");
     try {
       windowState.lastResponse = fs.readFileSync(outputFile, "utf8").trim();
@@ -1152,6 +1195,9 @@ class CodexPlugin extends Plugin {
   }
 
   async saveImageAttachment(file) {
+    if (!CAN_RUN_CODEX) {
+      throw new Error("手机端暂不支持添加图片");
+    }
     if (!isSupportedImageFile(file)) {
       throw new Error("只支持 PNG、JPG、WebP 或 GIF 图片");
     }
@@ -1342,6 +1388,9 @@ class CodexPlugin extends Plugin {
   }
 
   async runCodex(prompt, callbacks = {}, images = []) {
+    if (!CAN_RUN_CODEX) {
+      throw new Error(MOBILE_READONLY_NOTICE);
+    }
     const vaultPath = getVaultPath(this.app);
     if (!vaultPath) {
       throw new Error("Cannot determine this vault's filesystem path.");
@@ -1468,6 +1517,10 @@ class CodexSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("codex-settings");
+
+    if (!CAN_RUN_CODEX) {
+      containerEl.createEl("p", { text: MOBILE_READONLY_NOTICE });
+    }
 
     new Setting(containerEl).setName("Codex CLI").setHeading();
 

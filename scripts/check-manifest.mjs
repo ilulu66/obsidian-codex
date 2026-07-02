@@ -23,8 +23,8 @@ if (manifest.id !== "codex") {
   throw new Error(`Expected manifest id "codex", got "${manifest.id}"`);
 }
 
-if (!manifest.isDesktopOnly) {
-  throw new Error("Codex plugin must be desktop-only because it shells out to the local Codex CLI");
+if (manifest.isDesktopOnly !== false) {
+  throw new Error("Codex plugin must allow mobile: it loads there in sync-view mode and only runs the Codex CLI on desktop");
 }
 
 console.log(`Manifest OK: ${manifest.id}@${manifest.version}`);

@@ -1,9 +1,9 @@
 {
   "id": "codex",
   "name": "Codex",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "minAppVersion": "1.4.5",
-  "description": "Call Codex from inside Obsidian, using the current vault as Codex's working directory.",
+  "description": "Call Codex from inside Obsidian, using the current vault as Codex's working directory. On mobile the panel opens in sync-view mode.",
   "author": "Lulu + Codex",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }

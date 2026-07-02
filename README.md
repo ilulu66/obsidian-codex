@@ -22,12 +22,13 @@
 - 每个窗口会保存自己的 Codex 会话，后续提问会自动续接
 - 每个窗口可以单独命名
 - 默认只在当前 vault 工作，不会开启危险的全盘权限模式
+- 手机端支持同步查看模式：能看到全部窗口和聊天记录，能复制回复、插入笔记
 
 ## 安装前准备
 
 你需要先有：
 
-- Obsidian 桌面版
+- Obsidian 桌面版（运行 Codex 必须在桌面版；手机端只用来查看和使用同步过来的记录）
 - 已安装并登录的 Codex CLI
 
 如果你还没装 Codex CLI，可以在终端里运行：
@@ -47,7 +48,7 @@ codex --version
 
 打开最新版 Release：
 
-[下载 Obsidian Codex v0.4.0](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.4.0)
+[下载 Obsidian Codex 最新版](https://github.com/ilulu66/obsidian-codex/releases/latest)
 
 下载这三个文件：
 
@@ -105,6 +106,31 @@ Codex: Open Codex view
 想发图片时，可以点输入框上方的 `图片`，也可以直接把截图粘贴进去，或者把图片拖到输入框里。
 
 如果能看到 `OK`，说明插件已经跑通了。
+
+## 在手机上使用
+
+从 v0.5.0 开始，插件可以在 Obsidian 手机版加载，工作台会以「同步查看模式」出现在手机上。
+
+手机端能做什么：
+
+- 打开 Codex 面板，看到全部窗口和窗口名
+- 查看从电脑同步过来的完整聊天记录
+- 复制最近一次 Codex 回复
+- 用 `Insert last Codex response at cursor` 把回复插入手机上的笔记
+
+手机端不能做什么：
+
+- 不能运行 Codex（Codex CLI 只存在于你的电脑上）
+- 不能发送新消息、不能添加图片
+
+怎么把工作台同步到手机：
+
+1. 先让你的 vault 在电脑和手机之间同步（Obsidian Sync、iCloud、Syncthing 等都可以）
+2. 如果用 Obsidian Sync，在 `设置 -> 同步` 里勾选与第三方插件相关的选项（已安装的插件和插件设置），这样 `.obsidian/plugins/codex` 里的插件文件和聊天记录（`data.json`）才会同步
+3. 在手机上打开 `设置 -> 第三方插件`，启用 `Codex`
+4. 打开命令面板，运行 `Codex: Open Codex view`
+
+之后你在电脑上和 Codex 的每次对话，都会随 vault 同步出现在手机的工作台里。
 
 ## 关闭后怎么恢复
 
