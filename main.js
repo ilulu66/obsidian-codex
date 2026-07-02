@@ -326,12 +326,12 @@ class CodexView extends ItemView {
 
     this.inputEl = composer.createEl("textarea", {
       attr: {
-        placeholder: "问 Codex。按 Cmd/Ctrl + Enter 发送。",
+        placeholder: "问 Codex。按 Enter 发送，Shift + Enter 换行。",
         rows: "4"
       }
     });
     this.inputEl.addEventListener("keydown", async (event) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         await this.sendFromInput();
       }

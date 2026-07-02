@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Send messages with `Enter`.
+- Use `Shift + Enter` for a newline.
+- Avoid sending while a Chinese/Japanese/Korean IME composition is active.
+
 ## 0.2.1
 
 - Allow selecting and partially copying message text in the Codex panel.

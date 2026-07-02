@@ -41,7 +41,7 @@ codex --version
 
 打开最新版 Release：
 
-[下载 Obsidian Codex v0.2.1](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.2.1)
+[下载 Obsidian Codex v0.2.2](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.2.2)
 
 下载这三个文件：
 
@@ -81,7 +81,9 @@ Codex: Open Codex view
 只回复 OK
 ```
 
-然后点击发送，或者按 `Cmd + Enter`。
+然后按 `Enter` 发送。
+
+想在输入框里换行时，按 `Shift + Enter`。
 
 如果能看到 `OK`，说明插件已经跑通了。
 
