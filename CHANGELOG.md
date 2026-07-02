@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Allow the plugin to load on Obsidian mobile in sync-view mode.
+- On mobile you can browse every Codex window, read synced chat history, copy the last response, and insert it into notes.
+- Running Codex, attaching images, and sending prompts stay desktop-only; mobile shows a clear notice instead of failing.
+- Guard all Node-only APIs (`child_process`, `fs`, `os`, `path`) so the plugin no longer requires a desktop runtime to load.
+
 ## 0.4.0
 
 - Add a visible running status panel with current stage, elapsed seconds, stop action, and failure reason.
