@@ -13,7 +13,15 @@ const path = require("path");
 
 const VIEW_TYPE_CODEX = "codex-view";
 const PLUGIN_DIR = ".obsidian/plugins/codex";
-const CODEX_WINDOW_COUNT = 5;
+const CODEX_INITIAL_WINDOW_COUNT = 5;
+const CODEX_MAX_WINDOW_COUNT = 20;
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+const IMAGE_EXTENSION_BY_TYPE = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif"
+};
 const OLD_DEFAULT_PROMPT_PREFIX = "You are Codex running inside an Obsidian vault. Use the vault root as the workspace. When you mention vault files, prefer Obsidian wikilinks or vault-relative paths. Be concise, practical, and careful with file edits.";
 const DEFAULT_PROMPT_PREFIX = [
   "你是运行在 Obsidian vault 里的 Codex 助手。当前 vault 根目录就是你的工作目录。",
@@ -40,9 +48,9 @@ const DEFAULT_SETTINGS = {
   promptPrefix: DEFAULT_PROMPT_PREFIX
 };
 
-function createDefaultWindow(index) {
+function createDefaultWindow(index, id) {
   return {
-    id: `window-${index}`,
+    id: id || `window-${index}`,
     title: String(index),
     messages: [],
     lastResponse: "",
@@ -52,19 +60,25 @@ function createDefaultWindow(index) {
 
 function normalizeWindows(data) {
   const existingWindows = Array.isArray(data.windows) ? data.windows : [];
-  const windows = [];
-  for (let index = 1; index <= CODEX_WINDOW_COUNT; index += 1) {
-    const id = `window-${index}`;
-    const existing = existingWindows.find((windowState) => windowState && windowState.id === id) || {};
-    windows.push({
-      ...createDefaultWindow(index),
+  const windows = existingWindows
+    .filter((windowState) => windowState && typeof windowState.id === "string")
+    .map((existing, index) => ({
+      ...createDefaultWindow(index + 1, existing.id),
       ...existing,
-      id,
-      title: typeof existing.title === "string" && existing.title.trim() ? existing.title.trim() : String(index),
+      id: existing.id,
+      title: typeof existing.title === "string" && existing.title.trim() ? existing.title.trim() : String(index + 1),
       messages: Array.isArray(existing.messages) ? existing.messages : [],
       lastResponse: typeof existing.lastResponse === "string" ? existing.lastResponse : "",
-      sessionId: typeof existing.sessionId === "string" ? existing.sessionId : ""
-    });
+      sessionId: typeof existing.sessionId === "string" ? existing.sessionId : "",
+      images: Array.isArray(existing.images) ? existing.images : []
+    }));
+
+  const usedIds = new Set(windows.map((windowState) => windowState.id));
+  for (let index = 1; index <= CODEX_INITIAL_WINDOW_COUNT; index += 1) {
+    const id = `window-${index}`;
+    if (!usedIds.has(id)) {
+      windows.push(createDefaultWindow(index, id));
+    }
   }
 
   if (typeof data.lastResponse === "string" && data.lastResponse && !windows.some((windowState) => windowState.lastResponse)) {
@@ -92,6 +106,51 @@ function fileExists(filePath) {
   } catch (error) {
     return false;
   }
+}
+
+function isSupportedImageFile(file) {
+  if (!file) return false;
+  if (file.type && file.type.startsWith("image/")) return true;
+  const extension = path.extname(file.name || file.path || "").toLowerCase();
+  return IMAGE_EXTENSIONS.has(extension);
+}
+
+function getImageExtension(file) {
+  const extension = path.extname(file.name || file.path || "").toLowerCase();
+  if (IMAGE_EXTENSIONS.has(extension)) return extension;
+  return IMAGE_EXTENSION_BY_TYPE[file.type] || ".png";
+}
+
+function sanitizeAttachmentFileName(fileName, extension) {
+  const baseName = path.basename(fileName || `image${extension}`);
+  const cleaned = baseName
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  if (!cleaned) return `image${extension}`;
+  return path.extname(cleaned) ? cleaned : `${cleaned}${extension}`;
+}
+
+function normalizeImageAttachments(images) {
+  return (Array.isArray(images) ? images : [])
+    .map((image) => {
+      if (typeof image === "string") {
+        return { path: image, name: path.basename(image) };
+      }
+      if (!image || !image.path) return null;
+      return {
+        path: image.path,
+        name: image.name || path.basename(image.path)
+      };
+    })
+    .filter((image) => image && image.path);
+}
+
+function formatImageList(images) {
+  return images
+    .map((image, index) => `${index + 1}. ${image.name || path.basename(image.path)}`)
+    .join("\n");
 }
 
 function getNvmBins(homeDir) {
@@ -253,7 +312,7 @@ function addOption(selectEl, value, label) {
   return option;
 }
 
-function buildCodexArgs(settings, outputFile, sessionId) {
+function buildCodexArgs(settings, outputFile, sessionId, images) {
   const args = [];
   if (settings.enableSearch) {
     args.push("--search");
@@ -269,6 +328,10 @@ function buildCodexArgs(settings, outputFile, sessionId) {
 
   if (settings.model && settings.model.trim()) {
     args.push("-m", settings.model.trim());
+  }
+
+  for (const imagePath of images || []) {
+    args.push("-i", imagePath);
   }
 
   if (settings.dangerouslyBypassApprovalsAndSandbox) {
@@ -300,11 +363,20 @@ class CodexView extends ItemView {
     this.outputEl = null;
     this.inputEl = null;
     this.contextSelectEl = null;
+    this.imageInputEl = null;
+    this.imageTrayEl = null;
+    this.attachedImages = [];
     this.sendButtonEl = null;
     this.stopButtonEl = null;
     this.statusEl = null;
+    this.statusPanelEl = null;
+    this.statusStageEl = null;
+    this.statusSecondsEl = null;
+    this.statusDetailEl = null;
+    this.statusPanelStopButtonEl = null;
     this.activeAssistantEl = null;
     this.tabBarEl = null;
+    this.addWindowButtonEl = null;
     this.windowButtons = [];
     this.activeMessageIndex = null;
   }
@@ -332,6 +404,14 @@ class CodexView extends ItemView {
     title.createEl("h3", { text: "Codex" });
     this.tabBarEl = header.createDiv({ cls: "codex-tab-bar" });
     this.renderTabs();
+    this.addWindowButtonEl = header.createEl("button", {
+      cls: "codex-add-window-button",
+      text: "+",
+      attr: { type: "button", "aria-label": "New Codex window" }
+    });
+    this.addWindowButtonEl.addEventListener("click", async () => {
+      await this.createWindow();
+    });
 
     const actions = header.createDiv({ cls: "codex-header-actions" });
     const renameButton = actions.createEl("button", {
@@ -345,20 +425,31 @@ class CodexView extends ItemView {
 
     const clearButton = actions.createEl("button", {
       cls: "codex-icon-button",
-      text: "Clear",
+      text: "清空",
       attr: { type: "button", "aria-label": "Clear conversation" }
     });
     clearButton.addEventListener("click", () => this.clearOutput());
 
     this.stopButtonEl = actions.createEl("button", {
       cls: "codex-icon-button",
-      text: "Stop",
+      text: "停止",
       attr: { type: "button", "aria-label": "Stop Codex run" }
     });
     this.stopButtonEl.addEventListener("click", () => this.plugin.stopCurrentRun());
 
     this.outputEl = container.createDiv({ cls: "codex-output" });
     this.renderActiveWindow();
+
+    this.statusPanelEl = container.createDiv({ cls: "codex-run-status" });
+    this.statusStageEl = this.statusPanelEl.createSpan({ cls: "codex-run-status-stage", text: "就绪" });
+    this.statusSecondsEl = this.statusPanelEl.createSpan({ cls: "codex-run-status-seconds", text: "" });
+    this.statusDetailEl = this.statusPanelEl.createSpan({ cls: "codex-run-status-detail", text: "窗口已恢复，可以继续提问。" });
+    this.statusPanelStopButtonEl = this.statusPanelEl.createEl("button", {
+      cls: "codex-run-status-stop",
+      text: "停止",
+      attr: { type: "button", "aria-label": "Stop Codex run" }
+    });
+    this.statusPanelStopButtonEl.addEventListener("click", () => this.plugin.stopCurrentRun());
 
     const composer = container.createDiv({ cls: "codex-composer" });
     const toolbar = composer.createDiv({ cls: "codex-composer-toolbar" });
@@ -400,6 +491,26 @@ class CodexView extends ItemView {
       this.appendMessage("assistant", lastResponse);
     });
 
+    const imageButton = toolbar.createEl("button", {
+      text: "图片",
+      attr: { type: "button" }
+    });
+    imageButton.addEventListener("click", () => {
+      this.imageInputEl?.click();
+    });
+    this.imageInputEl = toolbar.createEl("input", {
+      attr: {
+        type: "file",
+        accept: "image/*",
+        multiple: "true"
+      }
+    });
+    this.imageInputEl.addClass("codex-image-input");
+    this.imageInputEl.addEventListener("change", async () => {
+      await this.attachFiles(Array.from(this.imageInputEl.files || []));
+      this.imageInputEl.value = "";
+    });
+
     const contextLabel = toolbar.createEl("label", { cls: "codex-context-toggle" });
     contextLabel.createSpan({ text: "上下文" });
     this.contextSelectEl = contextLabel.createEl("select", { cls: "codex-context-select" });
@@ -416,6 +527,9 @@ class CodexView extends ItemView {
       await this.plugin.saveSettings();
     });
 
+    this.imageTrayEl = composer.createDiv({ cls: "codex-image-tray" });
+    this.renderImageTray();
+
     this.inputEl = composer.createEl("textarea", {
       attr: {
         placeholder: "问 Codex。按 Enter 发送，Shift + Enter 换行。",
@@ -427,6 +541,26 @@ class CodexView extends ItemView {
         event.preventDefault();
         await this.sendFromInput();
       }
+    });
+    this.inputEl.addEventListener("paste", async (event) => {
+      const files = Array.from(event.clipboardData?.files || []).filter(isSupportedImageFile);
+      if (files.length > 0) {
+        event.preventDefault();
+        await this.attachFiles(files);
+      }
+    });
+    this.inputEl.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      this.inputEl.addClass("codex-drop-active");
+    });
+    this.inputEl.addEventListener("dragleave", () => {
+      this.inputEl.removeClass("codex-drop-active");
+    });
+    this.inputEl.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      this.inputEl.removeClass("codex-drop-active");
+      const files = Array.from(event.dataTransfer?.files || []).filter(isSupportedImageFile);
+      await this.attachFiles(files);
     });
 
     const footer = composer.createDiv({ cls: "codex-composer-footer" });
@@ -476,6 +610,22 @@ class CodexView extends ItemView {
     await this.renameWindow(this.plugin.getActiveWindow().id);
   }
 
+  async createWindow() {
+    if (this.plugin.currentProcess) {
+      new Notice("Codex 还在运行，结束后再新增窗口");
+      return;
+    }
+    const windowState = await this.plugin.createWindow();
+    if (!windowState) {
+      new Notice(`最多只能创建 ${CODEX_MAX_WINDOW_COUNT} 个 Codex 窗口`);
+      return;
+    }
+    this.activeAssistantEl = null;
+    this.activeMessageIndex = null;
+    this.renderTabs();
+    this.renderActiveWindow();
+  }
+
   async renameWindow(windowId) {
     if (this.plugin.currentProcess) {
       new Notice("Codex 还在运行，结束后再命名窗口");
@@ -504,14 +654,52 @@ class CodexView extends ItemView {
 
   async sendFromInput() {
     const text = this.inputEl.value.trim();
-    if (!text) {
-      new Notice("先写一句要问 Codex 的话");
+    if (!text && this.attachedImages.length === 0) {
+      new Notice("先写一句要问 Codex 的话，或添加一张图片");
       return;
     }
+    const images = [...this.attachedImages];
+    this.attachedImages = [];
+    this.renderImageTray();
     this.inputEl.value = "";
-    await this.sendPrompt(text, {
-      contextMode: this.plugin.settings.contextMode
+    await this.sendPrompt(text || "请分析这张图片。", {
+      contextMode: this.plugin.settings.contextMode,
+      images
     });
+  }
+
+  async attachFiles(files) {
+    if (!files || files.length === 0) return;
+    for (const file of files) {
+      try {
+        const imagePath = await this.plugin.saveImageAttachment(file);
+        this.attachedImages.push({
+          path: imagePath,
+          name: file.name || path.basename(imagePath)
+        });
+      } catch (error) {
+        new Notice(`图片添加失败：${error.message || error}`);
+      }
+    }
+    this.renderImageTray();
+  }
+
+  renderImageTray() {
+    if (!this.imageTrayEl) return;
+    this.imageTrayEl.empty();
+    this.imageTrayEl.classList.toggle("is-empty", this.attachedImages.length === 0);
+    for (const image of this.attachedImages) {
+      const chip = this.imageTrayEl.createDiv({ cls: "codex-image-chip" });
+      chip.createSpan({ text: image.name || path.basename(image.path) });
+      const removeButton = chip.createEl("button", {
+        text: "x",
+        attr: { type: "button", "aria-label": "Remove image" }
+      });
+      removeButton.addEventListener("click", () => {
+        this.attachedImages = this.attachedImages.filter((candidate) => candidate.path !== image.path);
+        this.renderImageTray();
+      });
+    }
   }
 
   async sendPrompt(text, options = {}) {
@@ -520,30 +708,37 @@ class CodexView extends ItemView {
       return;
     }
 
-    this.appendMessage("user", text);
+    const images = normalizeImageAttachments(options.images);
+    const displayText = images.length > 0 ? `${text}\n\n[图片附件]\n${formatImageList(images)}` : text;
+    this.appendMessage("user", displayText);
     const assistantEl = this.appendMessage("assistant", "正在准备上下文...");
     this.activeMessageIndex = Number(assistantEl.dataset.messageIndex);
     this.activeAssistantEl = assistantEl;
     this.setRunning(true);
     this.setStatus("Preparing context");
+    this.setRunStatus("正在读取上下文", "正在收集你选择的 Obsidian 上下文。", "running", 0);
     let statusText = "正在准备上下文";
     const startedAt = Date.now();
     const statusTimer = window.setInterval(() => {
       if (!this.activeAssistantEl) return;
       const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       this.updateAssistantText(`${statusText}... ${seconds}s`);
+      this.setRunStatus(statusText, "Codex 正在处理，请稍等。", "running", seconds);
       this.scrollToBottom();
     }, 1000);
 
     try {
       this.updateAssistantText("正在准备上下文...");
-      const prompt = await this.plugin.buildPrompt(text, options);
+      const prompt = await this.plugin.buildPrompt(text, { ...options, images });
       statusText = "正在启动 Codex";
       this.setStatus("Starting Codex");
+      this.setRunStatus("正在调用 Codex", "已经准备好上下文，正在启动 Codex。", "running", Math.round((Date.now() - startedAt) / 1000));
       await this.plugin.runCodex(prompt, {
         onStart: (info) => {
           statusText = info.isResume ? "正在续接这个窗口的 Codex 会话" : "正在创建这个窗口的 Codex 会话";
           this.setStatus(info.isResume ? "Resuming session" : "New session");
+          const imageDetail = info.images.length > 0 ? `已附加 ${info.images.length} 张图片。` : "";
+          this.setRunStatus(statusText, `${info.isResume ? "会继续当前窗口之前的 Codex 会话。" : "这是这个窗口的新 Codex 会话。"}${imageDetail}`, "running", Math.round((Date.now() - startedAt) / 1000));
           this.updateAssistantText([
             statusText + "。",
             "我会隐藏命令行日志，结束后只显示「思考过程（简要）」和「结果」。"
@@ -551,7 +746,14 @@ class CodexView extends ItemView {
         },
         onClose: (result) => {
           statusText = "正在整理结果";
+          if (result.stopped) {
+            this.setStatus("Stopped");
+            this.setRunStatus("已停止", "你手动停止了这次 Codex 运行。", "stopped", Math.round((Date.now() - startedAt) / 1000));
+            this.updateAssistantText(result.finalMessage || "已停止 Codex。");
+            return;
+          }
           this.setStatus(result.code === 0 ? "Done" : "Error");
+          this.setRunStatus(result.code === 0 ? "完成" : "失败", result.code === 0 ? "结果已写入当前窗口。" : `失败原因：Codex 退出码 ${result.code}${result.signal ? `，信号 ${result.signal}` : ""}`, result.code === 0 ? "done" : "error", Math.round((Date.now() - startedAt) / 1000));
           if (result.finalMessage) {
             this.updateAssistantText(result.finalMessage);
           } else if (result.code !== 0 && result.output) {
@@ -560,11 +762,12 @@ class CodexView extends ItemView {
             this.updateAssistantText("Codex 已结束，但没有返回文本。");
           }
         }
-      });
+      }, images);
     } catch (error) {
       assistantEl.addClass("codex-message-error");
       this.updateAssistantText(`Codex failed: ${error.message || error}`);
       this.setStatus("Error");
+      this.setRunStatus("失败", error.message || String(error), "error", Math.round((Date.now() - startedAt) / 1000));
       new Notice("Codex 运行失败，打开面板查看详情");
     } finally {
       window.clearInterval(statusTimer);
@@ -649,6 +852,7 @@ class CodexView extends ItemView {
   setRunning(isRunning) {
     if (this.sendButtonEl) this.sendButtonEl.disabled = isRunning;
     if (this.stopButtonEl) this.stopButtonEl.disabled = !isRunning;
+    if (this.statusPanelStopButtonEl) this.statusPanelStopButtonEl.disabled = !isRunning;
     if (this.inputEl) this.inputEl.classList.toggle("codex-running", isRunning);
     if (!isRunning && this.statusEl && this.statusEl.textContent === "Running") {
       this.setStatus("Ready");
@@ -659,6 +863,14 @@ class CodexView extends ItemView {
     if (!this.statusEl) return;
     this.statusEl.textContent = status;
     this.statusEl.dataset.status = status.toLowerCase().replace(/\s+/g, "-");
+  }
+
+  setRunStatus(stage, detail, kind, seconds) {
+    if (!this.statusPanelEl) return;
+    this.statusPanelEl.dataset.status = kind || "idle";
+    if (this.statusStageEl) this.statusStageEl.textContent = stage || "Ready";
+    if (this.statusDetailEl) this.statusDetailEl.textContent = detail || "";
+    if (this.statusSecondsEl) this.statusSecondsEl.textContent = Number.isFinite(seconds) && seconds > 0 ? `${seconds}s` : "";
   }
 
   scrollToBottom() {
@@ -679,6 +891,7 @@ class CodexPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.currentProcess = null;
+    this.currentProcessWasStopped = false;
     this.lastResponse = this.getActiveWindow().lastResponse || this.settings.lastResponse || "";
 
     this.registerView(VIEW_TYPE_CODEX, (leaf) => new CodexView(leaf, this));
@@ -693,7 +906,13 @@ class CodexPlugin extends Plugin {
       callback: () => this.activateView()
     });
 
-    for (let index = 1; index <= CODEX_WINDOW_COUNT; index += 1) {
+    this.addCommand({
+      id: "restore-view",
+      name: "Restore Codex panel / 恢复 Codex 面板",
+      callback: () => this.activateView()
+    });
+
+    for (let index = 1; index <= CODEX_INITIAL_WINDOW_COUNT; index += 1) {
       this.addCommand({
         id: `open-window-${index}`,
         name: `Open Codex window ${index}`,
@@ -843,6 +1062,23 @@ class CodexPlugin extends Plugin {
     await this.saveSettings();
   }
 
+  async createWindow() {
+    if (this.currentProcess) {
+      new Notice("Codex 还在运行，结束后再新增窗口");
+      return null;
+    }
+    if (this.settings.windows.length >= CODEX_MAX_WINDOW_COUNT) {
+      return null;
+    }
+    const index = this.settings.windows.length + 1;
+    const id = `window-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const windowState = createDefaultWindow(index, id);
+    this.settings.windows.push(windowState);
+    this.settings.activeWindowId = id;
+    await this.saveSettings();
+    return windowState;
+  }
+
   addMessageToActiveWindow(role, text) {
     const windowState = this.getActiveWindow();
     windowState.messages.push({
@@ -913,6 +1149,37 @@ class CodexPlugin extends Plugin {
       }
       return "";
     }
+  }
+
+  async saveImageAttachment(file) {
+    if (!isSupportedImageFile(file)) {
+      throw new Error("只支持 PNG、JPG、WebP 或 GIF 图片");
+    }
+
+    const existingPath = typeof file.path === "string" ? file.path : "";
+    if (existingPath && fileExists(existingPath)) {
+      return existingPath;
+    }
+
+    const vaultPath = getVaultPath(this.app);
+    if (!vaultPath) {
+      throw new Error("无法定位当前 vault 路径");
+    }
+
+    if (typeof file.arrayBuffer !== "function") {
+      throw new Error("无法读取这张图片");
+    }
+
+    const attachmentsDir = path.join(vaultPath, PLUGIN_DIR, "attachments");
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+
+    const extension = getImageExtension(file);
+    const safeName = sanitizeAttachmentFileName(file.name, extension);
+    const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const targetPath = path.join(attachmentsDir, `${uniquePrefix}-${safeName}`);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    fs.writeFileSync(targetPath, buffer);
+    return targetPath;
   }
 
   async getActiveMarkdownInfo() {
@@ -1062,11 +1329,19 @@ class CodexPlugin extends Plugin {
       );
     }
 
+    const images = normalizeImageAttachments(options.images);
+    if (images.length > 0) {
+      sections.push([
+        "Attached images:",
+        ...images.map((image, index) => `${index + 1}. ${image.path}`)
+      ].join("\n"));
+    }
+
     sections.push(["User request:", userPrompt].join("\n"));
     return sections.join("\n\n---\n\n");
   }
 
-  async runCodex(prompt, callbacks = {}) {
+  async runCodex(prompt, callbacks = {}, images = []) {
     const vaultPath = getVaultPath(this.app);
     if (!vaultPath) {
       throw new Error("Cannot determine this vault's filesystem path.");
@@ -1084,8 +1359,9 @@ class CodexPlugin extends Plugin {
       // Fine when there is no previous response file.
     }
 
+    const imagePaths = normalizeImageAttachments(images).map((image) => image.path);
     const commandInfo = resolveCodexCommand(this.settings);
-    const codexArgs = buildCodexArgs(this.settings, outputFile, sessionId);
+    const codexArgs = buildCodexArgs(this.settings, outputFile, sessionId, imagePaths);
     const args = [...commandInfo.args, ...codexArgs];
     const env = Object.assign({}, process.env, {
       PATH: getEnhancedPath(process.env.PATH || ""),
@@ -1100,9 +1376,10 @@ class CodexPlugin extends Plugin {
     });
 
     this.currentProcess = child;
+    this.currentProcessWasStopped = false;
     let combinedOutput = "";
 
-    callbacks.onStart?.({ command: commandInfo.command, args, cwd: vaultPath, isResume: Boolean(sessionId), sessionId });
+    callbacks.onStart?.({ command: commandInfo.command, args, cwd: vaultPath, isResume: Boolean(sessionId), sessionId, images: imagePaths });
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
@@ -1123,12 +1400,19 @@ class CodexPlugin extends Plugin {
 
     return new Promise((resolve, reject) => {
       child.on("error", (error) => {
-        this.currentProcess = null;
+        if (this.currentProcess === child) {
+          this.currentProcess = null;
+          this.currentProcessWasStopped = false;
+        }
         reject(error);
       });
 
       child.on("close", async (code, signal) => {
-        this.currentProcess = null;
+        const wasStopped = this.currentProcessWasStopped;
+        if (this.currentProcess === child) {
+          this.currentProcess = null;
+          this.currentProcessWasStopped = false;
+        }
         const cleanOutput = stripAnsi(combinedOutput).trim();
         const nextSessionId = extractSessionId(cleanOutput);
         let finalMessage = "";
@@ -1151,13 +1435,14 @@ class CodexPlugin extends Plugin {
           }
         }
 
-        const result = { code, signal, output: cleanOutput, finalMessage };
+        const result = { code, signal, output: cleanOutput, finalMessage, stopped: wasStopped };
         callbacks.onClose?.(result);
 
-        if (code === 0) {
+        if (code === 0 || wasStopped) {
           resolve(result);
         } else {
-          reject(new Error(`codex exited with code ${code}${signal ? ` (${signal})` : ""}`));
+          const reason = finalMessage || cleanOutput || `codex exited with code ${code}${signal ? ` (${signal})` : ""}`;
+          reject(new Error(reason));
         }
       });
     });
@@ -1167,9 +1452,9 @@ class CodexPlugin extends Plugin {
     if (!this.currentProcess) {
       return;
     }
+    this.currentProcessWasStopped = true;
     this.currentProcess.kill("SIGTERM");
-    this.currentProcess = null;
-    new Notice("已停止 Codex");
+    new Notice("正在停止 Codex");
   }
 }
 

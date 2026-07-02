@@ -9,10 +9,13 @@
 ## 它能做什么
 
 - 在 Obsidian 右侧打开一个 Codex 面板
-- 像 Claudian 一样提供 5 个固定窗口：`1 2 3 4 5`
+- 像 Claudian 一样默认提供 5 个窗口：`1 2 3 4 5`
+- 可以点顶部 `+` 继续新增窗口，最多 20 个
 - 每个窗口单独保存聊天记录和最近一次回复
+- 运行时能看到当前状态：正在读取上下文、正在调用 Codex、已运行多少秒、停止按钮、失败原因
 - 可以把当前笔记作为上下文发给 Codex
 - 可以选择上下文范围：不带、选中、小节、整篇、反链、同标签
+- 支持添加图片：点 `图片`、粘贴图片、拖拽图片到输入框都可以
 - 可以让 Codex 分析当前选中的文字
 - 可以让 Codex 阅读当前笔记并给建议
 - 可以把最近一次 Codex 回复插入到光标位置
@@ -44,7 +47,7 @@ codex --version
 
 打开最新版 Release：
 
-[下载 Obsidian Codex v0.3.0](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.3.0)
+[下载 Obsidian Codex v0.4.0](https://github.com/ilulu66/obsidian-codex/releases/tag/v0.4.0)
 
 下载这三个文件：
 
@@ -78,7 +81,7 @@ Codex: Open Codex view
 
 打开后，你会看到 Codex 面板顶部有 `1 2 3 4 5` 五个窗口。
 
-你可以点 `命名` 给当前窗口改名字，也可以双击顶部窗口标签改名。
+你可以点 `+` 新增窗口，点 `命名` 给当前窗口改名字，也可以双击顶部窗口标签改名。窗口名变长以后，顶部窗口栏可以左右滚动，不会挡住新增按钮。
 
 输入框上方的 `上下文` 下拉框可以选择这次要带给 Codex 的内容：
 
@@ -99,13 +102,34 @@ Codex: Open Codex view
 
 想在输入框里换行时，按 `Shift + Enter`。
 
+想发图片时，可以点输入框上方的 `图片`，也可以直接把截图粘贴进去，或者把图片拖到输入框里。
+
 如果能看到 `OK`，说明插件已经跑通了。
+
+## 关闭后怎么恢复
+
+如果你把右侧 Codex 面板关掉了，不用担心，聊天记录还在本地。
+
+重新打开的方法：
+
+```text
+Cmd + P -> Codex: Open Codex view
+```
+
+也可以搜索：
+
+```text
+Codex: Restore Codex panel / 恢复 Codex 面板
+```
+
+注意：这个插件是通过本地 Codex CLI 创建会话，Obsidian 面板里的对话不一定会出现在 Codex 桌面端的侧边栏里。恢复 Obsidian 里的对话，请以上面两个命令为准。
 
 ## 常用命令
 
 在 Obsidian 命令面板里可以搜索这些命令：
 
 - `Codex: Open Codex view`：打开 Codex 面板
+- `Codex: Restore Codex panel / 恢复 Codex 面板`：重新打开已经关闭的 Codex 面板
 - `Codex: Open Codex window 1` 到 `Codex: Open Codex window 5`：打开指定窗口
 - `Codex: Ask Codex about selection`：让 Codex 分析当前选中的文字
 - `Codex: Ask Codex about current note`：让 Codex 阅读当前笔记
@@ -154,8 +178,10 @@ which codex
 
 插件会在 Obsidian 本地保存：
 
-- 五个窗口的聊天记录
+- 窗口聊天记录
 - 每个窗口最近一次 Codex 回复
+- 每个窗口的 Codex 会话 id
+- 通过粘贴上传的图片附件
 - 插件设置
 
 这些数据只在你的 vault 本地，不会被这个 GitHub 仓库收集。

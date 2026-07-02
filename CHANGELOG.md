@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Add a visible running status panel with current stage, elapsed seconds, stop action, and failure reason.
+- Add a `+` button for creating more Codex windows, up to 20 total windows.
+- Make the window tab bar horizontally scrollable so renamed windows do not hide other controls.
+- Add image attachments through the image button, paste, and drag-and-drop.
+- Add a restore command for reopening the Codex panel after the Obsidian pane is closed.
+
 ## 0.3.0
 
 - Keep a real Codex session id per window and resume it on follow-up messages.
